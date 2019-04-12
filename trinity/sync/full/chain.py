@@ -81,7 +81,7 @@ from trinity._utils.ema import EMA
 from trinity._utils.headers import (
     skip_complete_headers,
 )
-from trinity._utils.humanize import humanize_elapsed, humanize_hash
+from trinity._utils.humanize import humanize_seconds, humanize_hash
 from trinity._utils.timer import Timer
 
 # (ReceiptBundle, (Receipt, (root_hash, receipt_trie_data))
@@ -645,7 +645,7 @@ class FastChainBodySyncer(BaseBodyChainSyncer):
                 stats.elapsed,
                 stats.latest_head.block_number,
                 humanize_hash(stats.latest_head.hash),
-                humanize_elapsed(head_age),
+                humanize_seconds(head_age),
             )
 
     async def _persist_ready_blocks(self) -> None:

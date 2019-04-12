@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Callable, TypeVar, cast, Dict, Type, Optional
 
 from trinity._utils.logging import HasExtendedDebugLogger
+from trinity._utils.humanize import humanize_seconds
 
 from p2p.kademlia import Node
 from p2p.exceptions import (
@@ -120,18 +121,24 @@ class SQLitePeerInfo(BasePeerInfo):
         now = datetime.datetime.utcnow()
         if bad_node:
             new_error_count = bad_node.error_count + 1
-            usable_time = now + datetime.timedelta(seconds=timeout * new_error_count)
-            local_time = utc_to_local(usable_time)
+            usable_delta = datetime.timedelta(seconds=timeout * new_error_count)
+            usable_time = now + usable_delta
             self.logger.debug(
-                '%s will not be retried until %s because %s', remote, local_time, reason
+                '%s will not be retried for %s because %s',
+                remote,
+                humanize_seconds(usable_delta.total_seconds()),
+                reason,
             )
             self._update_bad_node(enode, usable_time, reason, new_error_count)
             return
 
-        usable_time = now + datetime.timedelta(seconds=timeout)
-        local_time = utc_to_local(usable_time)
+        usable_delta = datetime.timedelta(seconds=timeout)
+        usable_time = now + usable_delta
         self.logger.debug(
-            '%s will not be retried until %s because %s', remote, local_time, reason
+            '%s will not be retried for %s because %s',
+            remote,
+            humanize_seconds(usable_delta.total_seconds()),
+            reason,
         )
         self._insert_bad_node(enode, usable_time, reason, error_count=1)
 
@@ -144,10 +151,12 @@ class SQLitePeerInfo(BasePeerInfo):
 
         until = str_to_time(bad_node.until)
         if datetime.datetime.utcnow() < until:
-            local_time = utc_to_local(until)
+            until_delta = until - datetime.datetime.utcnow()
             self.logger.debug(
-                'skipping %s, it failed because "%s" and is not usable until %s',
-                remote, bad_node.reason, local_time
+                'skipping %s, it failed because "%s" and is not usable for %s',
+                remote,
+                bad_node.reason,
+                humanize_seconds(until_delta.total_seconds()),
             )
             return False
 

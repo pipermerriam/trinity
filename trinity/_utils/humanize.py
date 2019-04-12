@@ -1,10 +1,14 @@
-from typing import Iterator
+from typing import Iterator, Tuple, Union
 
 from eth_typing import Hash32
 
+from eth_utils.toolz import take
 
-def humanize_elapsed(seconds: int) -> str:
-    return ''.join(_humanize_elapsed(seconds))
+
+def humanize_seconds(seconds: Union[float, int]) -> str:
+    unit_values = _consume_leading_zero_units(_humanize_seconds(int(seconds)))
+
+    return ''.join((f"{amount}{unit}" for amount, unit in take(3, unit_values)))
 
 
 SECOND = 1
@@ -27,23 +31,27 @@ UNITS = (
 )
 
 
-def _humanize_elapsed(seconds: int) -> Iterator[str]:
+def _consume_leading_zero_units(units_iter: Iterator[Tuple[int, str]]) -> Iterator[Tuple[int, str]]:
+    for amount, unit in units_iter:
+        if amount == 0:
+            continue
+        else:
+            yield (amount, unit)
+            yield from units_iter
+
+
+def _humanize_seconds(seconds: int) -> Iterator[Tuple[int, str]]:
     if not seconds:
         yield '0s'
 
-    num_display_units = 0
     remainder = seconds
 
     for duration, unit in UNITS:
         if not remainder:
             break
-        if remainder >= duration or num_display_units:
-            num = remainder // duration
-            yield f"{num}{unit}"
-            num_display_units += 1
 
-        if num_display_units >= 3:
-            return
+        num = remainder // duration
+        yield num, unit
 
         remainder %= duration
 

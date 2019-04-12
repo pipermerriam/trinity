@@ -1,6 +1,6 @@
 import pytest
 
-from trinity._utils.humanize import humanize_elapsed, humanize_hash
+from trinity._utils.humanize import humanize_seconds, humanize_hash
 
 
 SECOND = 1
@@ -36,8 +36,8 @@ WEEK = 7 * DAY
         (YEAR + MONTH + WEEK + DAY, '1y1m1w'),
     ),
 )
-def test_humanize_elapsed(seconds, expected):
-    actual = humanize_elapsed(seconds)
+def test_humanize_seconds(seconds, expected):
+    actual = humanize_seconds(seconds)
     assert actual == expected
 
 
