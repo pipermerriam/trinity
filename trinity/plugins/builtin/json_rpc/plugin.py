@@ -1,11 +1,16 @@
+from abc import ABC, abstractmethod
+import logging
 from argparse import (
     ArgumentParser,
     _SubParsersAction,
 )
-import asyncio
 from typing import (
-    Tuple
+    Any,
+    Tuple,
+    Type,
 )
+
+import curio
 
 from trinity.config import (
     Eth1AppConfig,
@@ -40,6 +45,94 @@ from trinity.rpc.ipc import (
 from trinity._utils.shutdown import (
     exit_with_service_and_endpoint,
 )
+
+
+class Controller:
+    logger = logging.getLogger('trinity.experimental.Service')
+
+    def __init__(self) -> None:
+        self.booted = curio.Event()
+        self.started = curio.Event()
+        self.cancelled = curio.Event()
+        self.cleaned_up = curio.Event()
+        self.finished = curio.Event()
+
+        self._run_lock = curio.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        return self._run_lock.locked()
+
+    async def __aenter__(self) -> None:
+        self.logger.debug('Entering Controller context')
+        group = curio.TaskGroup()
+        await self._run_lock.acquire()
+        self.logger.debug('Acquired run run lock')
+        try:
+            await group.__aenter__()
+            self.logger.debug('Entered TaskGroup context')
+        except Exception:
+            await self._run_lock.release()
+            raise
+
+        self.group = group
+
+        return self
+
+    async def __aexit__(self, exc_type: Type[Exception], exc: Exception, tb: Any) -> None:
+        await self._run_lock.release()
+        try:
+            await curio.timeout_after(20, controller.group.join())
+        finally:
+            await self.group.__aexit__()
+        del self.group
+
+
+class Service(ABC):
+    controller: Controller
+
+    def set_controller(self, controller: Controller) -> None:
+        if hasattr(self, 'controller'):
+            raise AttributeError('TODO')
+        self.controller = controller
+
+    @abstractmethod
+    async def start(self) -> None:
+        pass
+
+    async def cleanup(self) -> None:
+        pass
+
+    @staticmethod
+    async def run(service: 'Service') -> None:
+        """
+        Service Lifecycle
+        -----------------
+
+        booted -> started --> cancelled -> cleaned_up -> finished
+        """
+        service = service
+        controller = Controller()
+
+        service.set_controller(controller)
+
+        async with controller as controller:
+            controller.booted.set()
+
+            start_task = await controller.group.spawn(service.start())
+            controller.started.set()
+
+            try:
+                # wait for the service to exit
+                await start_task.join()
+            finally:
+                controller.cancelled.set()
+
+            cleanup_task = controller.group.spawn(service.cleanup())
+            await cleanup_task.join()
+
+        # Finished once the `Controller` context exits.
+        controller.finished.set()
 
 
 class JsonRpcServerPlugin(BaseIsolatedPlugin):
