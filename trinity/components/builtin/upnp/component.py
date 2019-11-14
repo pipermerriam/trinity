@@ -2,36 +2,30 @@ from argparse import (
     ArgumentParser,
     _SubParsersAction,
 )
-import asyncio
 
-from lahja import EndpointAPI
+from asyncio_run_in_process import run_in_process
+
+from p2p.service import AsyncioManager
 
 from trinity.extensibility import (
-    AsyncioIsolatedComponent,
+    BaseApplicationComponent,
 )
-from trinity._utils.shutdown import (
-    exit_with_services,
-)
+
 from .nat import (
     UPnPService
 )
 
 
-class UpnpComponent(AsyncioIsolatedComponent):
+class UpnpComponent(BaseApplicationComponent):
     """
     Continously try to map external to internal ip address/port using the
     Universal Plug 'n' Play (upnp) standard.
     """
+    name = "Upnp"
 
     @property
-    def name(self) -> str:
-        return "Upnp"
-
-    def on_ready(self, manager_eventbus: EndpointAPI) -> None:
-        if self.boot_info.args.disable_upnp:
-            self.logger.debug("UPnP component disabled")
-        else:
-            self.start()
+    def is_enabled(self) -> bool:
+        return not self._boot_info.args.disable_upnp
 
     @classmethod
     def configure_parser(cls,
@@ -43,11 +37,7 @@ class UpnpComponent(AsyncioIsolatedComponent):
             help="Disable upnp mapping",
         )
 
-    def do_start(self) -> None:
-        port = self.boot_info.trinity_config.port
-        self.upnp_service = UPnPService(port)
-        asyncio.ensure_future(exit_with_services(
-            self.upnp_service,
-            self._event_bus_service,
-        ))
-        asyncio.ensure_future(self.upnp_service.run())
+    async def run(self) -> None:
+        service = UPnPService(self._boot_info, self.name)
+
+        await run_in_process(AsyncioManager.run_service, service)

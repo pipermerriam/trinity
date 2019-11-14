@@ -29,12 +29,11 @@ from eth_hash.auto import keccak
 
 from eth_utils import (
     encode_hex,
+    get_extended_debug_logger,
 )
 
 from trie import HexaryTrie
 from trie.exceptions import BadTrieProof
-
-from cancel_token import CancelToken
 
 from eth.exceptions import (
     BlockNotFound,
@@ -51,7 +50,7 @@ from p2p.exceptions import (
     NoEligiblePeers,
 )
 from p2p.constants import (
-    COMPLETION_TIMEOUT,
+    # COMPLETION_TIMEOUT,
     MAX_REORG_DEPTH,
     MAX_REQUEST_ATTEMPTS,
     REPLY_TIMEOUT,
@@ -59,10 +58,7 @@ from p2p.constants import (
 from p2p.disconnect import DisconnectReason
 from p2p.peer import PeerSubscriber
 from p2p.protocol import Command
-from p2p.service import (
-    BaseService,
-    service_timeout,
-)
+from p2p.service import Service
 from p2p.typing import Payload
 
 from trinity.db.eth1.header import BaseAsyncHeaderDB
@@ -93,17 +89,17 @@ class BaseLightPeerChain(ABC):
         ...
 
 
-class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
+class LightPeerChain(PeerSubscriber, Service, BaseLightPeerChain):
+    logger = get_extended_debug_logger('trinity.sync.light.PeerChain')
+
     reply_timeout = REPLY_TIMEOUT
     headerdb: BaseAsyncHeaderDB = None
 
     def __init__(
             self,
             headerdb: BaseAsyncHeaderDB,
-            peer_pool: LESPeerPool,
-            token: CancelToken = None) -> None:
-        PeerSubscriber.__init__(self)
-        BaseService.__init__(self, token)
+            peer_pool: LESPeerPool) -> None:
+        super().__init__()
         self.headerdb = headerdb
         self.peer_pool = peer_pool
         self._pending_replies: Dict[int, Callable[[Payload], None]] = {}
@@ -115,10 +111,10 @@ class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
     # to be handled by the chain syncer), so our queue should never grow too much.
     msg_queue_maxsize = 500
 
-    async def _run(self) -> None:
+    async def run(self) -> None:
         with self.subscribe(self.peer_pool):
-            while self.is_operational:
-                peer, cmd, msg = await self.wait(self.msg_queue.get())
+            while self.manager.is_running:
+                peer, cmd, msg = await self.msg_queue.get()
                 if isinstance(msg, dict):
                     request_id = msg.get('request_id')
                     # request_id can be None here because not all LES messages include one. For
@@ -139,14 +135,15 @@ class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
             got_reply.set()
 
         self._pending_replies[request_id] = callback
-        await self.wait(got_reply.wait(), timeout=self.reply_timeout)
+        await asyncio.wait_for(got_reply.wait(), timeout=self.reply_timeout)
         # we need to cast here because mypy knows this should actually be of type
         # `protocol._DecodedMsgType`. However, we know the type should be restricted
         # to `Dict[str, Any]` and this is what all callsites expect
         return cast(Dict[str, Any], reply)
 
     @alru_cache(maxsize=1024, cache_exceptions=False)
-    @service_timeout(COMPLETION_TIMEOUT)
+    # TODO: re-implement `service_timeout`
+    # @service_timeout(COMPLETION_TIMEOUT)
     async def coro_get_block_header_by_hash(self, block_hash: Hash32) -> BlockHeader:
         """
         :param block_hash: hash of the header to retrieve
@@ -161,7 +158,8 @@ class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
         )
 
     @alru_cache(maxsize=1024, cache_exceptions=False)
-    @service_timeout(COMPLETION_TIMEOUT)
+    # TODO: re-implement `service_timeout`
+    # @service_timeout(COMPLETION_TIMEOUT)
     async def coro_get_block_body_by_hash(self, block_hash: Hash32) -> BlockBody:
         peer = cast(LESPeer, self.peer_pool.highest_td_peer)
         self.logger.debug("Fetching block %s from %s", encode_hex(block_hash), peer)
@@ -174,7 +172,8 @@ class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
     # TODO add a get_receipts() method to BaseChain API, and dispatch to this, as needed
 
     @alru_cache(maxsize=1024, cache_exceptions=False)
-    @service_timeout(COMPLETION_TIMEOUT)
+    # TODO: re-implement `service_timeout`
+    # @service_timeout(COMPLETION_TIMEOUT)
     async def coro_get_receipts(self, block_hash: Hash32) -> List[Receipt]:
         peer = cast(LESPeer, self.peer_pool.highest_td_peer)
         self.logger.debug("Fetching %s receipts from %s", encode_hex(block_hash), peer)
@@ -188,7 +187,8 @@ class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
     # request accounts and code (and storage?)
 
     @alru_cache(maxsize=1024, cache_exceptions=False)
-    @service_timeout(COMPLETION_TIMEOUT)
+    # TODO: re-implement `service_timeout`
+    # @service_timeout(COMPLETION_TIMEOUT)
     async def coro_get_account(self, block_hash: Hash32, address: ETHAddress) -> Account:
         return await self._retry_on_bad_response(
             partial(self._get_account_from_peer, block_hash, address)
@@ -212,7 +212,8 @@ class LightPeerChain(PeerSubscriber, BaseService, BaseLightPeerChain):
         return rlp.decode(rlp_account, sedes=Account)
 
     @alru_cache(maxsize=1024, cache_exceptions=False)
-    @service_timeout(COMPLETION_TIMEOUT)
+    # TODO: re-implement `service_timeout`
+    # @service_timeout(COMPLETION_TIMEOUT)
     async def coro_get_contract_code(self, block_hash: Hash32, address: ETHAddress) -> bytes:
         """
         :param block_hash: find code as of the block with block_hash

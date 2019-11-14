@@ -12,8 +12,6 @@ from typing import (
     cast,
 )
 
-from cancel_token import CancelToken
-
 from eth.abc import (
     AtomicDatabaseAPI,
     BlockAPI,
@@ -44,7 +42,7 @@ from eth_utils.toolz import (
 from lahja import EndpointAPI
 from lahja.common import BroadcastConfig
 
-from p2p.service import BaseService
+from p2p.service import Service
 
 from trinity._utils.timer import Timer
 from trinity.chains.full import FullChain
@@ -143,14 +141,13 @@ def make_pausing_beam_chain(
         chain_id: int,
         db: AtomicDatabaseAPI,
         event_bus: EndpointAPI,
-        loop: asyncio.AbstractEventLoop,
         urgent: bool = True) -> BeamChain:
     """
     Patch the py-evm chain with a VMState that pauses when state data
     is missing, and emits an event which requests the missing data.
     """
     pausing_vm_config = tuple(
-        (starting_block, pausing_vm_decorator(vm, event_bus, loop, urgent=urgent))
+        (starting_block, pausing_vm_decorator(vm, event_bus, urgent=urgent))
         for starting_block, vm in vm_config
     )
     PausingBeamChain = BeamChain.configure(
@@ -166,7 +163,6 @@ TVMFuncReturn = TypeVar('TVMFuncReturn')
 def pausing_vm_decorator(
         original_vm_class: Type[VirtualMachineAPI],
         event_bus: EndpointAPI,
-        loop: asyncio.AbstractEventLoop,
         urgent: bool = True) -> Type[VirtualMachineAPI]:
     """
     Decorate a py-evm VM so that it will pause when data is missing
@@ -245,6 +241,8 @@ def pausing_vm_decorator(
             Catch exceptions about missing state data and pause while waiting for
             the event bus to reply with the needed data.
             """
+            loop = asyncio.get_event_loop()
+
             while True:
                 try:
                     return vm_method(*args, **kwargs)  # type: ignore
@@ -400,19 +398,19 @@ def partial_import_block(beam_chain: BeamChain,
     return _import_block
 
 
-class BlockImportServer(BaseService):
+class BlockImportServer(Service):
+    logger = get_extended_debug_logger('p2p.sync.beam.BlockImportServer')
+
     def __init__(
             self,
             event_bus: EndpointAPI,
-            beam_chain: BeamChain,
-            token: CancelToken=None) -> None:
-        super().__init__(token=token)
+            beam_chain: BeamChain) -> None:
         self._event_bus = event_bus
         self._beam_chain = beam_chain
 
-    async def _run(self) -> None:
-        self.run_daemon_task(self.serve(self._event_bus, self._beam_chain))
-        await self.cancellation()
+    async def run(self) -> None:
+        self.manager.run_daemon_task(self.serve, self._event_bus, self._beam_chain)
+        await self.manager.wait_forever()
 
     async def serve(
             self,
@@ -423,9 +421,9 @@ class BlockImportServer(BaseService):
         Reply with StatelessBlockImportDone when import is complete.
         """
 
-        async for event in self.wait_iter(event_bus.stream(DoStatelessBlockImport)):
+        async for event in self._event_bus.stream(DoStatelessBlockImport):
             # launch in new thread, so we don't block the event loop!
-            import_completion = self.get_event_loop().run_in_executor(
+            import_completion = asyncio.get_event_loop().run_in_executor(
                 # Maybe build the pausing chain inside the new process?
                 None,
                 partial_import_block(beam_chain, event.block),
@@ -436,9 +434,13 @@ class BlockImportServer(BaseService):
             # In the tests, for example, we await cancel() this service, so that we know
             #   that the in-progress block is complete. Then below, we do not send back
             #   the import completion (so the import server won't get triggered again).
+            # TODO: comment above is outdated.
+            # TODO: this logic needs to be updated with an `asyncio.shield` and
+            # probably worth exploring something native in the `ManagerAPI` to
+            # do this in a generic way...
             await import_completion
 
-            if self.is_running:
+            if self.manager.is_running:
                 _broadcast_import_complete(
                     event_bus,
                     event.block,
@@ -522,14 +524,14 @@ def partial_speculative_execute(
     return _trigger_missing_state_downloads
 
 
-class BlockPreviewServer(BaseService):
+class BlockPreviewServer(Service):
+    logger = get_extended_debug_logger('trinity.sync.beam.BlockPreviewServer')
+
     def __init__(
             self,
             event_bus: EndpointAPI,
             beam_chain: BeamChain,
-            shard_num: int,
-            token: CancelToken=None) -> None:
-        super().__init__(token=token)
+            shard_num: int) -> None:
         self._event_bus = event_bus
         self._beam_chain = beam_chain
 
@@ -540,9 +542,9 @@ class BlockPreviewServer(BaseService):
         else:
             self._shard_num = shard_num
 
-    async def _run(self) -> None:
-        self.run_daemon_task(self.serve(self._event_bus, self._beam_chain))
-        await self.cancellation()
+    async def run(self) -> None:
+        self.manager.run_daemon_task(self.serve, self._event_bus, self._beam_chain)
+        await self.manager.wait_forever()
 
     async def serve(
             self,
@@ -557,7 +559,7 @@ class BlockPreviewServer(BaseService):
             thread_name_prefix="trinity-spec-exec-",
         )
 
-        async for event in self.wait_iter(event_bus.stream(DoStatelessBlockPreview)):
+        async for event in self._event_bus.stream(DoStatelessBlockPreview):
             if event.header.block_number % NUM_PREVIEW_SHARDS != self._shard_num:
                 continue
 

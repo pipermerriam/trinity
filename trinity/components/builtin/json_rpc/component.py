@@ -2,14 +2,15 @@ from argparse import (
     ArgumentParser,
     _SubParsersAction,
 )
-import asyncio
-from typing import Union, Tuple
-
-from lahja import EndpointAPI
+from typing import Union
 
 from eth.db.header import (
     HeaderDB,
 )
+
+from asyncio_run_in_process import run_in_process
+
+from p2p.service import AsyncioManager
 
 from trinity.config import (
     Eth1AppConfig,
@@ -24,7 +25,8 @@ from trinity.chains.light_eventbus import (
 from trinity.db.beacon.chain import AsyncBeaconChainDB
 from trinity.db.manager import DBClient
 from trinity.extensibility import (
-    AsyncioIsolatedComponent,
+    BaseApplicationComponent,
+    ComponentService,
 )
 from trinity.rpc.main import (
     RPCServer,
@@ -39,21 +41,14 @@ from trinity.rpc.ipc import (
 from trinity.rpc.http import (
     HTTPServer,
 )
-from trinity._utils.shutdown import (
-    exit_with_services,
-)
-from p2p.service import BaseService
 
 
-class JsonRpcServerComponent(AsyncioIsolatedComponent):
+class JsonRpcServerComponent(BaseApplicationComponent):
+    name = "JSON-RPC API"
 
     @property
-    def name(self) -> str:
-        return "JSON-RPC API"
-
-    def on_ready(self, manager_eventbus: EndpointAPI) -> None:
-        if not self.boot_info.args.disable_rpc:
-            self.start()
+    def is_enabled(self) -> bool:
+        return not self._boot_info.args.disable_rpc
 
     @classmethod
     def configure_parser(cls, arg_parser: ArgumentParser, subparser: _SubParsersAction) -> None:
@@ -74,8 +69,15 @@ class JsonRpcServerComponent(AsyncioIsolatedComponent):
             default=8545,
         )
 
-    def chain_for_eth1_config(self, trinity_config: TrinityConfig,
-                              eth1_app_config: Eth1AppConfig) -> AsyncChainAPI:
+    async def run(self) -> None:
+        service = JSONRPCService(self._boot_info, self.name)
+
+        await run_in_process(AsyncioManager.run_service, service)
+
+
+class JSONRPCService(ComponentService):
+    def _chain_for_eth1_config(self, trinity_config: TrinityConfig,
+                               eth1_app_config: Eth1AppConfig) -> AsyncChainAPI:
         chain_config = eth1_app_config.get_chain_config()
 
         db = DBClient.connect(trinity_config.database_ipc_path)
@@ -91,28 +93,28 @@ class JsonRpcServerComponent(AsyncioIsolatedComponent):
         else:
             raise Exception(f"Unsupported Database Mode: {eth1_app_config.database_mode}")
 
-    def chain_for_beacon_config(self, trinity_config: TrinityConfig,
-                                beacon_app_config: BeaconAppConfig) -> AsyncBeaconChainDB:
+    def _chain_for_beacon_config(self, trinity_config: TrinityConfig,
+                                 beacon_app_config: BeaconAppConfig) -> AsyncBeaconChainDB:
         chain_config = beacon_app_config.get_chain_config()
         db = DBClient.connect(trinity_config.database_ipc_path)
         return AsyncBeaconChainDB(db, chain_config.genesis_config)
 
-    def chain_for_config(
+    def _chain_for_config(
         self,
         trinity_config: TrinityConfig
     ) -> Union[AsyncChainAPI, AsyncBeaconChainDB]:
         if trinity_config.has_app_config(BeaconAppConfig):
             beacon_app_config = trinity_config.get_app_config(BeaconAppConfig)
-            return self.chain_for_beacon_config(trinity_config, beacon_app_config)
+            return self._chain_for_beacon_config(trinity_config, beacon_app_config)
         elif trinity_config.has_app_config(Eth1AppConfig):
             eth1_app_config = trinity_config.get_app_config(Eth1AppConfig)
-            return self.chain_for_eth1_config(trinity_config, eth1_app_config)
+            return self._chain_for_eth1_config(trinity_config, eth1_app_config)
         else:
             raise Exception("Unsupported Node Type")
 
-    def do_start(self) -> None:
+    async def run_component_service(self) -> None:
         trinity_config = self.boot_info.trinity_config
-        chain = self.chain_for_config(trinity_config)
+        chain = self._chain_for_config(trinity_config)
 
         if trinity_config.has_app_config(Eth1AppConfig):
             modules = initialize_eth1_modules(chain, self.event_bus)
@@ -125,16 +127,12 @@ class JsonRpcServerComponent(AsyncioIsolatedComponent):
 
         # Run IPC Server
         ipc_server = IPCServer(rpc, self.boot_info.trinity_config.jsonrpc_ipc_path)
-        asyncio.ensure_future(ipc_server.run())
-        services_to_exit: Tuple[BaseService, ...] = (
-            ipc_server,
-            self._event_bus_service,
-        )
+
+        self.manager.run_child_service(ipc_server)
 
         # Run HTTP Server
         if self.boot_info.args.enable_http:
             http_server = HTTPServer(rpc, port=self.boot_info.args.rpcport)
-            asyncio.ensure_future(http_server.run())
-            services_to_exit += (http_server,)
+            self.manager.run_child_service(http_server)
 
-        asyncio.ensure_future(exit_with_services(*services_to_exit))
+        await self.manager.wait_forever()

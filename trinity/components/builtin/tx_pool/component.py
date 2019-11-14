@@ -2,9 +2,9 @@ from argparse import (
     ArgumentParser,
     _SubParsersAction,
 )
-import asyncio
+import logging
 
-from lahja import EndpointAPI
+from asyncio_run_in_process import run_in_process
 
 from eth.chains.mainnet import (
     PETERSBURG_MAINNET_BLOCK,
@@ -13,7 +13,8 @@ from eth.chains.ropsten import (
     PETERSBURG_ROPSTEN_BLOCK,
 )
 
-from trinity._utils.shutdown import exit_with_services
+from p2p.service import AsyncioManager
+
 from trinity.config import (
     Eth1AppConfig,
 )
@@ -25,7 +26,8 @@ from trinity.constants import (
 )
 from trinity.db.manager import DBClient
 from trinity.extensibility import (
-    AsyncioIsolatedComponent,
+    BaseApplicationComponent,
+    ComponentService,
 )
 from trinity.components.builtin.tx_pool.pool import (
     TxPool,
@@ -36,12 +38,11 @@ from trinity.components.builtin.tx_pool.validators import (
 from trinity.protocol.eth.peer import ETHProxyPeerPool
 
 
-class TxComponent(AsyncioIsolatedComponent):
+class TxComponent(BaseApplicationComponent):
     tx_pool: TxPool = None
+    name = "TxComponent"
 
-    @property
-    def name(self) -> str:
-        return "TxComponent"
+    logger = logging.getLogger('trinity.components.TxComponent')
 
     @classmethod
     def configure_parser(cls, arg_parser: ArgumentParser, subparser: _SubParsersAction) -> None:
@@ -51,24 +52,24 @@ class TxComponent(AsyncioIsolatedComponent):
             help="Disables the Transaction Pool",
         )
 
-    def on_ready(self, manager_eventbus: EndpointAPI) -> None:
-
-        light_mode = self.boot_info.args.sync_mode == SYNC_LIGHT
-        is_disable = self.boot_info.args.disable_tx_pool
+    @property
+    def is_enabled(self) -> bool:
+        light_mode = self._boot_info.args.sync_mode == SYNC_LIGHT
+        is_disable = self._boot_info.args.disable_tx_pool
         is_supported = not light_mode
         is_enabled = not is_disable and is_supported
-
-        if is_disable:
-            self.logger.debug("Transaction pool disabled")
-        elif not is_supported:
+        if not is_supported:
             self.logger.warning("Transaction pool disabled.  Not supported in light mode.")
-        elif is_enabled:
-            self.start()
-        else:
-            raise Exception("This code path should be unreachable")
+        return is_enabled
 
-    def do_start(self) -> None:
+    async def run(self) -> None:
+        service = TxPoolService(self._boot_info, self.name)
 
+        await run_in_process(AsyncioManager.run_service, service)
+
+
+class TxPoolService(ComponentService):
+    async def run_component_service(self) -> None:
         trinity_config = self.boot_info.trinity_config
         db = DBClient.connect(trinity_config.database_ipc_path)
 
@@ -86,14 +87,5 @@ class TxComponent(AsyncioIsolatedComponent):
 
         proxy_peer_pool = ETHProxyPeerPool(self.event_bus, TO_NETWORKING_BROADCAST_CONFIG)
 
-        self.tx_pool = TxPool(self.event_bus, proxy_peer_pool, validator)
-        asyncio.ensure_future(exit_with_services(self.tx_pool, self._event_bus_service))
-        asyncio.ensure_future(self.tx_pool.run())
-
-    async def do_stop(self) -> None:
-        # This isn't really needed for the standard shutdown case as the TxPool will automatically
-        # shutdown whenever the `CancelToken` it was chained with is triggered. It may still be
-        # useful to stop the TxPool component individually though.
-        if self.tx_pool.is_operational:
-            await self.tx_pool.cancel()
-            self.logger.info("Successfully stopped TxPool")
+        tx_pool = TxPool(self.event_bus, proxy_peer_pool, validator)
+        self.manager.run_daemon_child_service(tx_pool)

@@ -1,12 +1,4 @@
-from argparse import (
-    ArgumentParser,
-)
-import logging
-import multiprocessing
-from typing import (
-    Tuple,
-    Type,
-)
+from typing import Type
 
 from eth.db.backends.level import (
     LevelDB,
@@ -31,58 +23,22 @@ from trinity.initialization import (
     initialize_beacon_database,
     is_beacon_database_initialized,
 )
+from trinity.main import TrinityMain
 from trinity.components.registry import (
     get_components_for_beacon_client,
 )
-from trinity._utils.logging import setup_child_process_logging
-from trinity._utils.ipc import (
-    wait_for_ipc,
-    kill_process_gracefully,
-)
-from trinity._utils.mp import (
-    ctx,
+from trinity._utils.logging import (
+    setup_child_process_logging,
 )
 
 
 def main_beacon() -> None:
     main_entry(
-        trinity_boot,
+        BeaconMain,
         APP_IDENTIFIER_BEACON,
         get_components_for_beacon_client(),
         (BeaconAppConfig,)
     )
-
-
-def trinity_boot(boot_info: BootInfo) -> Tuple[multiprocessing.Process, ...]:
-    logger = logging.getLogger('trinity')
-
-    trinity_config = boot_info.trinity_config
-
-    ensure_beacon_dirs(trinity_config.get_app_config(BeaconAppConfig))
-
-    # First initialize the database process.
-    database_server_process = ctx.Process(
-        name="DB",
-        target=run_database_process,
-        args=(
-            trinity_config,
-            LevelDB,
-        ),
-    )
-
-    # start the processes
-    database_server_process.start()
-    logger.info("Started DB server process (pid=%d)", database_server_process.pid)
-
-    try:
-        wait_for_ipc(trinity_config.database_ipc_path)
-    except TimeoutError as e:
-        logger.error("Timeout waiting for database to start.  Exiting...")
-        kill_process_gracefully(database_server_process, logger)
-        ArgumentParser().error(message="Timed out waiting for database start")
-        return None
-
-    return (database_server_process,)
 
 
 def run_database_process(boot_info: BootInfo, db_class: Type[LevelDB]) -> None:
@@ -105,3 +61,10 @@ def run_database_process(boot_info: BootInfo, db_class: Type[LevelDB]) -> None:
                 manager.wait_stopped()
             except KeyboardInterrupt:
                 pass
+
+
+class BeaconMain(TrinityMain):
+    run_database_process = staticmethod(run_database_process)
+
+    def ensure_dirs(self) -> None:
+        ensure_beacon_dirs(self.boot_info.trinity_config.get_app_config(BeaconAppConfig))

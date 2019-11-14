@@ -1,15 +1,19 @@
-from argparse import ArgumentParser
-import logging
-import multiprocessing
+import asyncio
+import signal
 from typing import (
     Tuple,
     Type,
 )
 
+from eth_utils import get_extended_debug_logger
+
+from asyncio_run_in_process import open_in_process
+
 from eth.db.backends.level import LevelDB
 from eth.db.chain import ChainDB
 
-from trinity.boot_info import BootInfo
+from p2p.service import Service
+
 from trinity.bootstrap import (
     main_entry,
 )
@@ -28,62 +32,33 @@ from trinity.initialization import (
 from trinity.components.registry import (
     get_components_for_eth1_client,
 )
+from trinity.event_bus import ComponentManager
+from trinity.extensibility import TrinityBootInfo, ApplicationComponentAPI
 from trinity._utils.ipc import (
     wait_for_ipc,
-    kill_process_gracefully,
 )
 from trinity._utils.logging import (
     setup_child_process_logging,
-)
-from trinity._utils.mp import (
-    ctx,
+    set_logger_levels,
 )
 
 
 def main() -> None:
     main_entry(
-        trinity_boot,
+        TrinityMain,
         APP_IDENTIFIER_ETH1,
         get_components_for_eth1_client(),
         (Eth1AppConfig,)
     )
 
 
-def trinity_boot(boot_info: BootInfo) -> Tuple[multiprocessing.Process]:
+async def run_database_process(boot_info: TrinityBootInfo, db_class: Type[LevelDB]) -> None:
     trinity_config = boot_info.trinity_config
-    ensure_eth1_dirs(trinity_config.get_app_config(Eth1AppConfig))
 
-    logger = logging.getLogger('trinity')
-
-    # First initialize the database process.
-    database_server_process: multiprocessing.Process = ctx.Process(
-        name="DB",
-        target=run_database_process,
-        args=(
-            boot_info,
-            LevelDB,
-        ),
-    )
-
-    # start the processes
-    database_server_process.start()
-    logger.info("Started DB server process (pid=%d)", database_server_process.pid)
-
-    # networking process needs the IPC socket file provided by the database process
-    try:
-        wait_for_ipc(trinity_config.database_ipc_path)
-    except TimeoutError as e:
-        logger.error("Timeout waiting for database to start.  Exiting...")
-        kill_process_gracefully(database_server_process, logger)
-        ArgumentParser().error(message="Timed out waiting for database start")
-        return None
-
-    return (database_server_process,)
-
-
-def run_database_process(boot_info: BootInfo, db_class: Type[LevelDB]) -> None:
+    # setup cross process logging
     setup_child_process_logging(boot_info)
-    trinity_config = boot_info.trinity_config
+    if boot_info.args.log_levels:
+        set_logger_levels(boot_info.args.log_levels)
 
     with trinity_config.process_id_file('database'):
         app_config = trinity_config.get_app_config(Eth1AppConfig)
@@ -95,9 +70,65 @@ def run_database_process(boot_info: BootInfo, db_class: Type[LevelDB]) -> None:
             chain_config = app_config.get_chain_config()
             initialize_database(chain_config, chaindb, base_db)
 
+        loop = asyncio.get_event_loop()
+
         manager = DBManager(base_db)
         with manager.run(trinity_config.database_ipc_path):
             try:
-                manager.wait_stopped()
+                await loop.run_in_executor(None, manager.wait_stopped)
             except KeyboardInterrupt:
-                pass
+                manager.logger.info('Got KeyboardInterrupt in Database')
+                manager.stop()
+
+
+class TrinityMain(Service):
+    logger = get_extended_debug_logger('trinity.TrinityMain')
+
+    def __init__(self,
+                 boot_info: TrinityBootInfo,
+                 component_types: Tuple[Type[ApplicationComponentAPI], ...]) -> None:
+        self.boot_info = boot_info
+        self.component_types = component_types
+
+    def ensure_dirs(self) -> None:
+        ensure_eth1_dirs(self.boot_info.trinity_config.get_app_config(Eth1AppConfig))
+
+    run_database_process = staticmethod(run_database_process)
+
+    async def run(self) -> None:
+        trinity_config = self.boot_info.trinity_config
+
+        loop = asyncio.get_event_loop()
+
+        self.logger.debug("Starting logging listener")
+        # start the listener thread which handles logs produced in other
+        # processes in the local logger.
+
+        self.ensure_dirs()
+
+        async with open_in_process(self.run_database_process, self.boot_info, LevelDB) as db_proc:  # noqa: E501
+            self.logger.debug("started database process")
+            await loop.run_in_executor(None, wait_for_ipc, trinity_config.database_ipc_path)
+            self.logger.debug("database process IPC path available")
+
+            component_manager_service = ComponentManager(
+                self.boot_info,
+                self.component_types,
+            )
+            self.logger.debug("running component manager")
+            manager = self.manager.run_child_service(component_manager_service)
+            try:
+                await manager.wait_forever()
+            except KeyboardInterrupt:
+                self.logger.info('Got KeyboardInterrupt in main TrinityMain')
+                self.manager.cancel()
+            finally:
+                self.logger.info('Starting termination')
+                db_proc.send_signal(signal.SIGINT)
+                self.logger.info('issued terminate to proc')
+                try:
+                    await asyncio.wait_for(db_proc.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    db_proc.terminate()
+                self.logger.info('finished `db_proc.wait()` call')
+        self.logger.info('exited database process context')

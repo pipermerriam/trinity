@@ -17,6 +17,7 @@ from eth_hash.auto import keccak
 from eth_utils import (
     to_checksum_address,
     ValidationError,
+    get_extended_debug_logger,
 )
 from eth_typing import (
     Address,
@@ -25,12 +26,10 @@ from eth_typing import (
 
 from eth.abc import AtomicDatabaseAPI
 
-from cancel_token import CancelToken, OperationCancelled
-
 from p2p.abc import CommandAPI
 from p2p.exceptions import BaseP2PError, PeerConnectionLost
 from p2p.peer import BasePeer, PeerSubscriber
-from p2p.service import BaseService
+from p2p.service import Service
 
 from trie import HexaryTrie
 from trie.exceptions import MissingTrieNode
@@ -61,11 +60,13 @@ from trinity.sync.beam.constants import (
 from trinity.sync.common.peers import WaitingPeers
 
 
-class BeamDownloader(BaseService, PeerSubscriber):
+class BeamDownloader(Service, PeerSubscriber):
     """
     Coordinate the request of needed state data: accounts, storage, bytecodes, and
     other arbitrary intermediate nodes in the trie.
     """
+    logger = get_extended_debug_logger('trinity.sync.beam.Downloader')
+
     do_predictive_downloads = False
     _total_processed_nodes = 0
     _urgent_processed_nodes = 0
@@ -93,9 +94,7 @@ class BeamDownloader(BaseService, PeerSubscriber):
             db: AtomicDatabaseAPI,
             peer_pool: ETHPeerPool,
             queen_tracker: QueenTrackerAPI,
-            event_bus: EndpointAPI,
-            token: CancelToken = None) -> None:
-        super().__init__(token)
+            event_bus: EndpointAPI) -> None:
         self._db = db
         self._trie_db = HexaryTrie(db)
         self._node_data_peers = WaitingPeers[ETHPeer](NodeData)
@@ -283,7 +282,7 @@ class BeamDownloader(BaseService, PeerSubscriber):
         Monitor TaskQueue for needed trie nodes, and request them from peers. Repeat as necessary.
         Prefer urgent nodes over predictive ones.
         """
-        while self.is_operational:
+        while self.manager.is_running:
             urgent_batch_id, urgent_hashes = await self._get_waiting_urgent_hashes()
 
             predictive_batch_id, predictive_hashes = self._maybe_add_predictive_nodes(urgent_hashes)
@@ -336,7 +335,7 @@ class BeamDownloader(BaseService, PeerSubscriber):
     async def _get_waiting_urgent_hashes(self) -> Tuple[int, Tuple[Hash32, ...]]:
         # if any predictive nodes are waiting, then time out after a short pause to grab them
         try:
-            return await self.wait(
+            return await asyncio.wait_for(
                 self._node_tasks.get(eth_constants.MAX_STATE_FETCH),
                 timeout=DELAY_BEFORE_NON_URGENT_REQUEST,
             )
@@ -458,14 +457,6 @@ class BeamDownloader(BaseService, PeerSubscriber):
             self.logger.debug("Problem downloading nodes from peer, dropping...", exc_info=True)
             self._queen_tracker.penalize_queen(peer)
             return tuple()
-        except OperationCancelled:
-            self.logger.debug(
-                "Service cancellation while fetching nodes, dropping %s from queue",
-                peer,
-                exc_info=True,
-            )
-            self._queen_tracker.penalize_queen(peer)
-            return tuple()
         except CancelledError:
             self.logger.debug("Pending nodes call to %r future cancelled", peer)
             self._queen_tracker.penalize_queen(peer)
@@ -505,18 +496,18 @@ class BeamDownloader(BaseService, PeerSubscriber):
             self._total_timeouts += 1
             return tuple()
 
-    async def _run(self) -> None:
+    async def run(self) -> None:
         """
         Request all nodes in the queue, running indefinitely
         """
         self._timer.start()
         self.logger.info("Starting beam state sync")
-        self.run_task(self._periodically_report_progress())
+        self.manager.run_task(self._periodically_report_progress)
         with self.subscribe(self._peer_pool):
-            await self.wait(self._match_node_requests_to_peers())
+            await self._match_node_requests_to_peers()
 
     async def _periodically_report_progress(self) -> None:
-        while self.is_operational:
+        while self.manager.is_running:
             msg = "all=%d  " % self._total_processed_nodes
             msg += "urgent=%d  " % self._urgent_processed_nodes
             msg += "pred=%d  " % self._predictive_processed_nodes
@@ -541,4 +532,4 @@ class BeamDownloader(BaseService, PeerSubscriber):
             )
             self._num_urgent_requests_by_peer.clear()
             self._num_predictive_requests_by_peer.clear()
-            await self.sleep(self._report_interval)
+            await asyncio.sleep(self._report_interval)
