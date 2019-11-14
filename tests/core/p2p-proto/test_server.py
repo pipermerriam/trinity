@@ -3,8 +3,6 @@ import pytest
 
 from eth_keys import keys
 
-from cancel_token import CancelToken
-
 from eth.chains.ropsten import RopstenChain, ROPSTEN_GENESIS_HEADER
 from eth.db.atomic import AtomicDB
 from eth.db.chain import ChainDB
@@ -16,7 +14,7 @@ from p2p.kademlia import (
     Address,
 )
 from p2p.handshake import negotiate_protocol_handshakes
-from p2p.service import run_service
+from p2p.service import background_asyncio_service
 from p2p.tools.factories import (
     get_open_port,
     DevP2PHandshakeParamsFactory,
@@ -59,7 +57,6 @@ class ParagonServer(BaseServer):
         return ParagonPeerPool(
             privkey=self.privkey,
             context=ParagonContext(),
-            token=self.cancel_token,
             event_bus=self.event_bus,
         )
 
@@ -86,7 +83,7 @@ def get_server(privkey, address, event_bus):
 @pytest.fixture
 async def server(event_bus):
     server = get_server(RECEIVER_PRIVKEY, SERVER_ADDRESS, event_bus)
-    async with run_service(server):
+    async with background_asyncio_service(server):
         # wait for the tcp server to be present
         for _ in range(50):
             if hasattr(server, '_tcp_listener'):
@@ -98,8 +95,7 @@ async def server(event_bus):
 @pytest.mark.asyncio
 async def test_server_incoming_connection(monkeypatch, server, event_loop):
     use_eip8 = False
-    token = CancelToken("initiator")
-    initiator = HandshakeInitiator(RECEIVER_REMOTE, INITIATOR_PRIVKEY, use_eip8, token)
+    initiator = HandshakeInitiator(RECEIVER_REMOTE, INITIATOR_PRIVKEY, use_eip8)
     for _ in range(10):
         # The server isn't listening immediately so we give it a short grace
         # period while trying to connect.
@@ -109,7 +105,7 @@ async def test_server_incoming_connection(monkeypatch, server, event_loop):
             await asyncio.sleep(0)
     # Send auth init message to the server, then read and decode auth ack
     aes_secret, mac_secret, egress_mac, ingress_mac = await _handshake(
-        initiator, reader, writer, token)
+        initiator, reader, writer)
 
     transport = Transport(
         remote=RECEIVER_REMOTE,
@@ -125,7 +121,6 @@ async def test_server_incoming_connection(monkeypatch, server, event_loop):
     factory = ParagonPeerFactory(
         initiator.privkey,
         context=ParagonContext(),
-        token=token,
     )
     handshakers = await factory.get_handshakers()
     devp2p_handshake_params = DevP2PHandshakeParamsFactory(
@@ -136,7 +131,6 @@ async def test_server_incoming_connection(monkeypatch, server, event_loop):
         transport=transport,
         p2p_handshake_params=devp2p_handshake_params,
         protocol_handshakers=handshakers,
-        token=token,
     )
     connection = Connection(
         multiplexer=multiplexer,
@@ -176,18 +170,15 @@ async def test_peer_pool_connect(monkeypatch, event_loop, server):
         context=ParagonContext(),
     )
     nodes = [RECEIVER_REMOTE]
-    asyncio.ensure_future(initiator_peer_pool.run(), loop=event_loop)
-    await initiator_peer_pool.events.started.wait()
-    await initiator_peer_pool.connect_to_nodes(nodes)
-    # Give the receiver_server a chance to ack the handshake.
-    await asyncio.sleep(0.2)
 
-    assert len(started_peers) == 1
-    assert len(initiator_peer_pool.connected_nodes) == 1
+    async with background_asyncio_service(initiator_peer_pool):
+        await initiator_peer_pool.manager.wait_started()
+        await initiator_peer_pool.connect_to_nodes(nodes)
+        # Give the receiver_server a chance to ack the handshake.
+        await asyncio.sleep(0.2)
 
-    # Stop our peer to make sure its pending asyncio tasks are cancelled.
-    await list(initiator_peer_pool.connected_nodes.values())[0].cancel()
-    await initiator_peer_pool.cancel()
+        assert len(started_peers) == 1
+        assert len(initiator_peer_pool.connected_nodes) == 1
 
 
 @pytest.mark.asyncio

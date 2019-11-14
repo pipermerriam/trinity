@@ -7,7 +7,6 @@ from zipfile import ZipFile
 from async_generator import (
     asynccontextmanager,
 )
-from cancel_token import OperationCancelled
 from eth_keys import keys
 from eth_utils import decode_hex
 from eth_utils.toolz import (
@@ -22,6 +21,8 @@ from eth.tools.builder.chain import (
     genesis,
     latest_mainnet_at,
 )
+
+from p2p.service import background_asyncio_service
 
 from trinity.constants import TO_NETWORKING_BROADCAST_CONFIG
 
@@ -55,12 +56,9 @@ def run_mock_request_response(request_type, response, bus):
 async def connect_to_peers_loop(peer_pool, nodes):
     """Loop forever trying to connect to one of the given nodes if the pool is not yet full."""
     while peer_pool.is_operational:
-        try:
-            if not peer_pool.is_full:
-                await peer_pool.connect_to_nodes(nodes)
-            await peer_pool.wait(asyncio.sleep(2))
-        except OperationCancelled:
-            break
+        if not peer_pool.is_full:
+            await peer_pool.connect_to_nodes(nodes)
+        await asyncio.sleep(2)
 
 
 FUNDED_ACCT = keys.PrivateKey(
@@ -122,15 +120,9 @@ async def run_peer_pool_event_server(event_bus, peer_pool, handler_type=None):
     event_server = handler_type(
         event_bus,
         peer_pool,
-        peer_pool.cancel_token
     )
-    asyncio.ensure_future(event_server.run())
-
-    await event_server.events.started.wait()
-    try:
-        yield event_server
-    finally:
-        await event_server.cancel()
+    async with background_asyncio_service(event_server):
+        yield
 
 
 @asynccontextmanager

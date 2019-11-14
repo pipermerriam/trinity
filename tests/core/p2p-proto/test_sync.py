@@ -7,7 +7,7 @@ from eth.exceptions import HeaderNotFound
 from eth.vm.forks.petersburg import PetersburgVM
 from eth_utils import decode_hex
 from lahja import ConnectionConfig, AsyncioEndpoint
-from p2p.service import BaseService
+from p2p.service import Service
 import pytest
 
 from trinity.db.eth1.chain import AsyncChainDB
@@ -225,7 +225,6 @@ async def test_beam_syncer(
             import_server = BlockImportServer(
                 pausing_endpoint,
                 client_chain,
-                token=client.cancel_token,
             )
             asyncio.ensure_future(import_server.run())
 
@@ -287,7 +286,7 @@ async def test_regular_syncer(request, event_loop, event_bus, chaindb_fresh, cha
             assert head.state_root in chaindb_fresh.db
 
 
-class FallbackTesting_RegularChainSyncer(BaseService):
+class FallbackTesting_RegularChainSyncer(Service):
     class HeaderSyncer_OnlyOne:
         def __init__(self, real_syncer):
             self._real_syncer = real_syncer
@@ -316,10 +315,9 @@ class FallbackTesting_RegularChainSyncer(BaseService):
         async def until_headers_requested(self):
             await self._headers_requested.wait()
 
-    def __init__(self, chain, db, peer_pool, token=None) -> None:
-        super().__init__(token=token)
+    def __init__(self, chain, db, peer_pool) -> None:
         self._chain = chain
-        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool, token=self.cancel_token)
+        self._header_syncer = ETHHeaderChainSyncer(chain, db, peer_pool)
         self._single_header_syncer = self.HeaderSyncer_OnlyOne(self._header_syncer)
         self._paused_header_syncer = self.HeaderSyncer_PauseThenRest(self._header_syncer)
         self._draining_syncer = RegularChainBodySyncer(
@@ -328,7 +326,6 @@ class FallbackTesting_RegularChainSyncer(BaseService):
             peer_pool,
             self._single_header_syncer,
             SimpleBlockImporter(chain),
-            self.cancel_token,
         )
         self._body_syncer = RegularChainBodySyncer(
             chain,
@@ -336,32 +333,32 @@ class FallbackTesting_RegularChainSyncer(BaseService):
             peer_pool,
             self._paused_header_syncer,
             SimpleBlockImporter(chain),
-            self.cancel_token,
         )
 
-    async def _run(self) -> None:
-        self.run_daemon(self._header_syncer)
+    async def run(self) -> None:
+        self.manager.run_daemon_child_service(self._header_syncer)
         starting_header = await self._chain.coro_get_canonical_head()
 
         # want body_syncer to start early so that it thinks the genesis is the canonical head
-        self.run_child_service(self._body_syncer)
+        self.manager.run_child_service(self._body_syncer)
         await self._paused_header_syncer.until_headers_requested()
 
         # now drain out the first header and save it to db
-        self.run_child_service(self._draining_syncer)
+        draining_manager = self.manager.run_child_service(self._draining_syncer)
 
         # wait until first syncer saves to db, then cancel it
         latest_header = starting_header
         while starting_header == latest_header:
             latest_header = await self._chain.coro_get_canonical_head()
             await self.sleep(0.03)
-        await self._draining_syncer.cancel()
+        await draining_manager.cancel()
+        await draining_manager.wait_stopped()
 
         # now permit the next syncer to begin
         self._paused_header_syncer.unpause()
 
         # run regular sync until cancelled
-        await self.events.cancelled.wait()
+        await self.manager.wait_stopped()
 
 
 @pytest.mark.asyncio

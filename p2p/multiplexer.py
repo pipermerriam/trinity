@@ -166,7 +166,6 @@ class Multiplexer(CancellableMixin, MultiplexerAPI):
 
     def close(self) -> None:
         self._transport.close()
-        self.cancel_token.trigger()
 
     #
     # Protocol API

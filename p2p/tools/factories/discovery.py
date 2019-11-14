@@ -65,7 +65,6 @@ from p2p.discv5.typing import (
 )
 from p2p.ecies import generate_privkey
 
-from .cancel_token import CancelTokenFactory
 from .kademlia import AddressFactory
 
 
@@ -76,8 +75,6 @@ class DiscoveryProtocolFactory(factory.Factory):
     privkey = factory.LazyFunction(generate_privkey)
     address = factory.SubFactory(AddressFactory)
     bootstrap_nodes = factory.LazyFunction(tuple)
-
-    cancel_token = factory.SubFactory(CancelTokenFactory, name='discovery-test')
 
     @classmethod
     def from_seed(cls, seed: bytes, *args: Any, **kwargs: Any) -> DiscoveryProtocol:
