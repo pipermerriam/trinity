@@ -152,7 +152,7 @@ class TxPool(BaseService):
                     self._add_txs_to_bloom(receiving_peer.session, filtered_tx)
                     # release to the event loop since this loop processes a
                     # lot of data queue up a lot of outbound messages.
-                    await asyncio.sleep(0)
+                    await self.sleep(0)
 
     def _filter_tx_for_peer(
             self,

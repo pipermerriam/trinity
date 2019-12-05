@@ -1,5 +1,6 @@
 import asyncio
 from concurrent.futures import (
+    Executor,
     ThreadPoolExecutor,
 )
 import ipaddress
@@ -11,7 +12,6 @@ from urllib.parse import urlparse
 
 from cancel_token import (
     CancelToken,
-    OperationCancelled,
 )
 from p2p.exceptions import (
     NoInternalAddressMatchesDevice,
@@ -75,20 +75,21 @@ class UPnPService(BaseService):
         On every iteration we configure the port mapping with a lifetime of 30 minutes and then
         sleep for that long as well.
         """
-        while self.is_operational:
-            try:
-                await self.add_nat_portmap()
-                # Wait for the port mapping lifetime, and then try registering it again
-                await self.wait(asyncio.sleep(self._nat_portmap_lifetime))
-            except (OperationCancelled, asyncio.CancelledError):
-                break
-            except Exception:
-                self.logger.exception("Failed to setup NAT portmap")
+        with ThreadPoolExecutor() as executor:
+            while self.is_operational:
+                try:
+                    await self.add_nat_portmap(executor)
+                    # Wait for the port mapping lifetime, and then try registering it again
+                    await self.sleep(self._nat_portmap_lifetime)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.logger.exception("Failed to setup NAT portmap")
 
     async def _cleanup(self) -> None:
         pass
 
-    async def add_nat_portmap(self) -> str:
+    async def add_nat_portmap(self, executor: Executor) -> str:
         """
         Set up the port mapping
 
@@ -96,7 +97,7 @@ class UPnPService(BaseService):
         """
         self.logger.info("Setting up NAT portmap...")
         try:
-            async for upnp_dev in self._discover_upnp_devices():
+            async for upnp_dev in self._discover_upnp_devices(executor):
                 try:
                     external_ip = await self._add_nat_portmap(upnp_dev)
                 except NoInternalAddressMatchesDevice as exc:
@@ -150,14 +151,16 @@ class UPnPService(BaseService):
         self.logger.info("NAT port forwarding successfully set up: %r", self._mapping)
         return external_ip
 
-    async def _discover_upnp_devices(self) -> AsyncGenerator[upnpclient.upnp.Device, None]:
+    async def _discover_upnp_devices(self,
+                                     executor: Executor,
+                                     ) -> AsyncGenerator[upnpclient.upnp.Device, None]:
         loop = asyncio.get_event_loop()
         # Use loop.run_in_executor() because upnpclient.discover() is blocking and may take a
         # while to complete. We must use a ThreadPoolExecutor() because the
         # response from upnpclient.discover() can't be pickled.
         try:
             devices = await self.wait(
-                loop.run_in_executor(ThreadPoolExecutor(max_workers=1), upnpclient.discover),
+                loop.run_in_executor(executor, upnpclient.discover),
                 timeout=UPNP_DISCOVER_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:

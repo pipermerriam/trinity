@@ -1,19 +1,19 @@
 from abc import abstractmethod
-import asyncio
-import concurrent
-import logging
-import signal
 
+from asyncio_run_in_process import open_in_process
 from lahja import EndpointAPI
 
 from p2p.service import run_service
 
-from trinity._utils.ipc import kill_process_gracefully
-from trinity._utils.mp import ctx
+from trinity._utils.logging import setup_child_process_logging
+from trinity._utils.profiling import profiler
 from trinity.boot_info import BootInfo
 
 from .component import BaseIsolatedComponent
 from .event_bus import AsyncioEventBusService
+
+import logging
+logger = logging.getLogger('trinity')
 
 
 class AsyncioIsolatedComponent(BaseIsolatedComponent):
@@ -30,37 +30,13 @@ class AsyncioIsolatedComponent(BaseIsolatedComponent):
         - _do_run -> do_run
             * sets up event bus and then enters user function.
         """
-        process = ctx.Process(
-            target=self._run_process,
-            args=(self._boot_info,),
-        )
-        loop = asyncio.get_event_loop()
-
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            await loop.run_in_executor(executor, process.start)
-            try:
-                await loop.run_in_executor(executor, process.join)
-            finally:
-                kill_process_gracefully(
-                    process,
-                    logging.getLogger('trinity.extensibility.AsyncioIsolatedComponent'),
-                )
-
-    @classmethod
-    def run_process(cls, boot_info: BootInfo) -> None:
-        loop = asyncio.get_event_loop()
-        task = asyncio.ensure_future(cls._do_run(boot_info))
-        loop.add_signal_handler(signal.SIGINT, task.cancel)
-        loop.add_signal_handler(signal.SIGTERM, task.cancel)
-        try:
-            loop.run_until_complete(task)
-        except asyncio.CancelledError:
-            pass
-        finally:
-            loop.close()
+        async with open_in_process(self._do_run, self._boot_info) as proc:
+            await proc.wait()
 
     @classmethod
     async def _do_run(cls, boot_info: BootInfo) -> None:
+        setup_child_process_logging(boot_info)
+
         endpoint_name = cls._get_endpoint_name()
         event_bus_service = AsyncioEventBusService(
             boot_info.trinity_config,
@@ -69,11 +45,15 @@ class AsyncioIsolatedComponent(BaseIsolatedComponent):
         async with run_service(event_bus_service):
             await event_bus_service.wait_event_bus_available()
             event_bus = event_bus_service.get_event_bus()
+
             try:
-                await cls.do_run(boot_info, event_bus)
-            except asyncio.CancelledError:
-                await event_bus_service.cancel()
-                raise
+                if boot_info.profile:
+                    with profiler(f'profile_{cls._get_endpoint_name}'):
+                        await cls.do_run(boot_info, event_bus)
+                else:
+                    await cls.do_run(boot_info, event_bus)
+            except KeyboardInterrupt:
+                return
 
     @classmethod
     @abstractmethod
