@@ -18,18 +18,6 @@ logger = logging.getLogger('trinity')
 
 class AsyncioIsolatedComponent(BaseIsolatedComponent):
     async def run(self) -> None:
-        """
-        Call chain is:
-
-        - multiprocessing.Process -> _run_process
-            * isolates to a new process
-        - _run_process -> run_process
-            * sets up subprocess logging
-        - run_process -> _do_run
-            * runs the event loop and transitions into async context
-        - _do_run -> do_run
-            * sets up event bus and then enters user function.
-        """
         async with open_in_process(self._do_run, self._boot_info) as proc:
             await proc.wait()
 
