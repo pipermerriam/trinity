@@ -45,6 +45,7 @@ deps = {
         "websockets==5.0.1",
         "jsonschema==3.0.1",
         "mypy-extensions>=0.4.3,<0.5.0",
+        "sniffio>=1.1.0,<2",
         "typing_extensions>=3.7.2,<4.0.0",
         "ruamel.yaml==0.15.98",
         "argcomplete>=1.10.0,<2",

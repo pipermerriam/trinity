@@ -1,16 +1,15 @@
 from abc import abstractmethod
 
 from asyncio_run_in_process import open_in_process
+from async_service import background_asyncio_service
 from lahja import EndpointAPI
-
-from p2p.service import run_service
 
 from trinity._utils.logging import setup_child_process_logging
 from trinity._utils.profiling import profiler
 from trinity.boot_info import BootInfo
 
 from .component import BaseIsolatedComponent
-from .event_bus import AsyncioEventBusService
+from .event_bus import EventBusService
 
 import logging
 logger = logging.getLogger('trinity')
@@ -26,13 +25,12 @@ class AsyncioIsolatedComponent(BaseIsolatedComponent):
         setup_child_process_logging(boot_info)
 
         endpoint_name = cls._get_endpoint_name()
-        event_bus_service = AsyncioEventBusService(
+        event_bus_service = EventBusService(
             boot_info.trinity_config,
             endpoint_name,
         )
-        async with run_service(event_bus_service):
-            await event_bus_service.wait_event_bus_available()
-            event_bus = event_bus_service.get_event_bus()
+        async with background_asyncio_service(event_bus_service):
+            event_bus = await event_bus_service.get_event_bus()
 
             try:
                 if boot_info.profile:
