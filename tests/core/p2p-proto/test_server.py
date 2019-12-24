@@ -14,7 +14,6 @@ from p2p.connection import Connection
 from p2p.handshake import negotiate_protocol_handshakes
 from p2p.service import run_service
 from p2p.tools.factories import (
-    get_open_port,
     DevP2PHandshakeParamsFactory,
     NodeFactory,
 )
@@ -38,7 +37,6 @@ from tests.core.integration_test_helpers import (
 )
 
 
-port = get_open_port()
 NETWORK_ID = 99
 RECEIVER_PRIVKEY = keys.PrivateKey(eip8_values['receiver_private_key'])
 RECEIVER_PUBKEY = RECEIVER_PRIVKEY.public_key
